@@ -1,99 +1,82 @@
-# dictate
+# Pi Dictate — local Whisper
 
-Minimal voice dictation for pi. No floating bubbles, no menu bar app, no notifications.
+Local fork of [amosblomqvist/pi-dictate](https://github.com/amosblomqvist/pi-dictate), based on commit `3208b563e3adfd070ac7b256a09ba9fc7b869f50`. Upstream MIT license retained in `LICENSE`.
 
-- **Toggle:** `alt+m` (press to start, press again to stop) — works **anywhere in pi**, not just the main chat input: quiz popups, `ask_user_question`, `ctx.ui.editor()`/`input()` dialogs, selectors. The key is intercepted at the TUI input layer, before whatever component has focus.
-- **Cancel:** `alt+n` (discard the in-flight transcript; safe to press anytime, no-op when no dictation is in flight)
-- **Where text goes:** to whatever input field is focused **when you stop** (never replaces, always appends):
-  - Main chat editor or any `ctx.ui.editor()`/`input()` popup → appended directly.
-  - Opaque dialogs (quiz / ask_user_question selects) → typed in as keystrokes. Their internal focus is invisible to the extension, so **Tab into the note/Other field first** — that's where the text will land.
-  - Nothing text-capable focused → transcript is copied to the clipboard (via `pbcopy`, so macOS-only) and a notification says so. A finished dictation is never lost.
-- **Start guard:** if no input field is focused when you press `alt+m`, dictation doesn't start and a notification explains why.
-- **Live feedback:** while recording, the status row shows a red `●` plus a real-time mic-level meter (`● ▂▅▇ listening…`) — instant confirmation your mic is live. On stop it flips to a `finalizing…` spinner.
-- **Backend:** Deepgram Nova-3 streaming
-- **What's "real-time":** audio is transcribed *while you talk*; the finalized text is inserted in one shot when you stop. Stop-to-display latency is typically ~300-500ms.
+Uses OpenAI's Whisper model through **whisper.cpp**, with Metal acceleration on Apple Silicon. No Deepgram, OpenAI API, credentials, local HTTP server, or audio uploads. Unlike upstream's streaming service, transcription starts **after you stop recording** and takes a few seconds depending on recording length and hardware. The model loads for each dictation.
 
-[![dictate demo](assets/dictate.png)](https://www.youtube.com/watch?v=gYxZt9Qe0fk)
+## Requirements
+
+- macOS with [Pi](https://github.com/earendil-works/pi) installed (tested on Apple M2).
+- `whisper-cli` and SoX `rec` from Homebrew.
+- Default model: `~/.cache/whisper/ggml-small.en.bin` (English, 487,614,201 bytes).
+- Model SHA-256: `c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d`.
+
+The Python `whisper` package is not required. Models and dependencies are downloaded separately, not included in this repository.
+
+## Use
+
+Run `/reload` in Pi after installation.
+
+1. Focus an input field.
+2. **Alt+M** starts recording; a red dot and live mic meter appear.
+3. **Alt+M** stops recording; a spinner shows local transcription.
+4. The finished text is appended, never automatically submitted.
+5. **Alt+N** cancels recording or transcription and discards the result.
+
+Commands: `/dictate`, `/dictate start`, `/dictate stop`, `/dictate cancel`, `/dictate status`.
+
+Works in the main editor and dialogs. In quiz/ask-user-question dialogs, **Tab into the note/Other text field first**, and keep it focused until the text arrives. Opaque dialogs do not expose their internal input focus. If the focused component changes after stopping, the transcript is copied to the macOS clipboard instead of being inserted into the wrong dialog.
+
+macOS must allow your terminal microphone access: System Settings → Privacy & Security → Microphone. Option must send Alt/Meta (iTerm2: Profile → Keys → Option key → Esc+). If Option+M types `µ`, change that terminal setting or use `/dictate` commands.
+
+## Privacy and resource limits
+
+Recording starts only on an explicit shortcut/command in interactive Pi. The extension never starts a microphone on load or in RPC/print mode. PCM audio is buffered in memory, limited to five minutes. Stop writes a WAV and transcript inside a private temporary directory, removed after success, cancellation, or errors. Cancellation and session shutdown terminate child processes; a force-kill fallback handles stuck children. Inference has a five-minute timeout.
+
+As with any temporary files, a hard crash or power loss can leave `pi-dictate-*` directories under the OS temporary directory. Debug mode logs only shortcut/lifecycle information, not speech. Once you submit dictated text, Pi sends that text to your selected assistant provider as usual.
+
+The first decode may take longer while Metal compiles shaders (about 23 seconds in the initial test on this M2; subsequent processing was about 2.4 seconds for a short sentence).
+
+Whisper can hallucinate text in noise or silence. Very short/digitally silent input is skipped, but **review the transcription before submitting**.
 
 ## Install
 
-```bash
-pi install git:github.com/amosblomqvist/pi-dictate
+```sh
+brew install whisper-cpp sox
+mkdir -p ~/.cache/whisper
+curl -fL --retry 3 \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin \
+  -o ~/.cache/whisper/ggml-small.en.bin.part && \
+  mv ~/.cache/whisper/ggml-small.en.bin.part ~/.cache/whisper/ggml-small.en.bin
+pi install git:github.com/nithilgadde/pi-dictate-local
 ```
 
-Or manually: copy `index.ts` to `~/.pi/agent/extensions/dictate/index.ts`.
+Dependencies and model download require the internet once. Actual dictation does not.
 
-## One-time setup
+## Configuration
 
-```bash
-brew install sox                              # provides `rec` for audio capture
-export DEEPGRAM_API_KEY=dg_xxxxxxxxxxxxxxxx   # add to ~/.zshrc or ~/.bashrc
+Optional environment variables, set in the shell that launches Pi:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DICTATE_WHISPER_MODEL` | `~/.cache/whisper/ggml-small.en.bin` | Local whisper.cpp GGML model file |
+| `DICTATE_WHISPER_BIN` | `whisper-cli` | Decoder executable path |
+| `DICTATE_REC_BIN` | `rec` | SoX recorder executable path |
+| `DICTATE_LANGUAGE` | `en` | Whisper language code or `auto` |
+| `DICTATE_DEBUG` | unset | Enable shortcut debug log at `/tmp/dictate-debug.log` |
+
+For other languages, download a **multilingual** model (e.g. `ggml-small.bin`, not `.en.bin`) and set `DICTATE_LANGUAGE=auto` or a language code. For faster decoding with lower accuracy, use `ggml-base.en.bin`. Executable discovery also checks `/opt/homebrew/bin` and `/usr/local/bin`.
+
+## Development
+
+```sh
+git clone https://github.com/nithilgadde/pi-dictate-local.git
+cd pi-dictate-local
+npm install --ignore-scripts
+npm run check
+npm test  # Node 24; fake subprocesses, no microphone required
 ```
 
-Sign up at https://console.deepgram.com — $200 free credit, no card. The Nova-3 streaming rate is ~$0.0077/min (~$0.46/hr).
+`index.ts` retains upstream's focus-aware UI and shortcuts. `local-whisper.ts` owns audio capture, WAV encoding, bounded processes, cancellation, and transcription. Pi supplies its own packages at runtime.
 
-## Usage
-
-1. Focus any pi input field — the main chat input, a quiz note field, an `ask_user_question` answer box.
-2. Press `alt+m`. The status row shows a red `●` with a live mic-level meter: `● ▁▂▃▅ listening…`. The bars move with your voice — if they stay flat, no audio is reaching the extension.
-3. Talk.
-4. Press `alt+m` again. The meter is replaced by a braille spinner (`⠋ finalizing…`), then the text appears in the focused input.
-
-Focus is resolved fresh at stop time, so if a dialog opened (or focus moved) while you were talking, the text goes to whatever is focused at that moment.
-
-Run `/reload` in pi after first install (or after editing `index.ts`) to pick up changes.
-
-## How it works
-
-- The extension spawns `rec` (sox) capturing 16kHz mono 16-bit PCM to stdout.
-- It opens a Deepgram WebSocket and pipes the PCM stream in.
-- Deepgram returns "final" results (per-utterance, stable) as you talk. Interim/partial results are disabled — the editor never shows revisable text.
-- While recording, each audio chunk's RMS loudness is mapped to a bar glyph and shifted through a 6-cell ring every 60ms — the live level meter in the status row.
-- On stop, the extension sends `{"type": "CloseStream"}`, waits for the server to flush, and concatenates all finals. (If Deepgram never closes the socket, a 3s timeout forces finalization.)
-- **Focus-aware delivery:** the extension captures pi's `TUI` instance once (via an invisible zero-height widget) and installs a `tui.addInputListener` handler — listeners run *before* the focused component, which is why `alt+m` works inside dialogs (extension shortcuts are otherwise only matched by the main editor). Kitty-protocol key **release/repeat** events are filtered out, so one physical press toggles exactly once. On stop it inspects `tui.focusedComponent`: editor-like components (anything with `getText`/`setText`, including popups' inner `.editor`) get a direct append; opaque components get the text as synthetic keystrokes routed by their own focus logic.
-
-## Customizing
-
-All knobs are at the top of `index.ts`:
-
-- **Hotkey:** change the `Key.alt("m")` / `Key.alt("n")` references near the bottom (the input listener `onGlobalInput` and the fallback `pi.registerShortcut` calls).
-- **Model:** edit `DG_URL` — swap `model=nova-3` for `nova-2`, `enhanced`, etc.
-- **Endpointing (how long a silence ends an utterance):** `endpointing=300` in the URL. Lower = faster finals, more fragmentation. Higher = slower finals, more coherent chunks.
-- **Smart formatting / punctuation:** toggle `smart_format` and `punctuate` in the URL.
-- **Level meter:** `METER_CELLS` (width in bars), `METER_TICK_MS` (update rate), `METER_FLOOR_DB` / `METER_CEILING_DB` (loudness range mapped to empty/full bars).
-
-## Why `alt+m` / `alt+n` (and tmux)
-
-The defaults are `alt`-based rather than `ctrl+shift`-based because **`ctrl+shift+<letter>` is not representable as a legacy terminal byte** — adding Shift to `Ctrl+M` doesn't change the byte, so `Ctrl+Shift+M` is indistinguishable from `Ctrl+M` (i.e. `\r` = Enter). That means inside **tmux** (which doesn't pass through the Kitty keyboard protocol, and only forwards modified keys when `extended-keys` is on — it's off by default), `ctrl+shift+m` would collapse to **Enter and submit your prompt**, and `ctrl+shift+n` would collapse to `Ctrl+N`.
-
-`alt+<letter>` is safe because it has a distinct legacy byte (`Alt+M` → `ESC m`), which tmux forwards even without `extended-keys`. pi-tui matches this legacy form, so the binding works:
-
-- inside tmux with default settings (the legacy `ESC m` form),
-- inside tmux with `extended-keys on` + `extended-keys-format csi-u` (CSI-u form),
-- and outside tmux with Kitty protocol / modifyOtherKeys active.
-
-On macOS, your terminal must treat Option as Alt/Meta (pi already requires this for its own `alt+enter` follow-up and `alt+up` dequeue bindings). Ghostty does this by default; in iTerm2 set Profile → Keys → Left/Right Option key → `Esc+`.
-
-If you prefer the original `ctrl+shift+m` / `ctrl+shift+n` bindings and run inside tmux, add this to `~/.tmux.conf` (tmux 3.5+) so tmux forwards modified keys in CSI-u form, then edit the `registerShortcut` calls at the bottom of `index.ts`:
-
-```
-set -g extended-keys on
-set -g extended-keys-format csi-u
-```
-
-See https://pi.dev/docs/latest/tmux for the full pi-on-tmux keyboard guide.
-
-## Troubleshooting
-
-- **"DEEPGRAM_API_KEY not set"** — env var isn't visible to pi. Restart your terminal after editing your shell rc file, or run `export DEEPGRAM_API_KEY=...` in the same shell that launches pi.
-- **"Failed to spawn 'rec'" / "rec error"** — `brew install sox` and verify with `which rec`.
-- **No mic input** — first check the level meter: if the bars stay flat while you talk, no audio is reaching sox. macOS may need to grant your terminal app microphone access. System Settings → Privacy & Security → Microphone → enable your terminal (Terminal.app, iTerm, Ghostty, etc.).
-- **Nothing happens after stop** — check console output (errors are surfaced as pi notifications). Most common cause: WebSocket couldn't reach Deepgram (firewall, bad key). If you saw "no input field is focused", the transcript was copied to the clipboard — paste with ⌘V.
-- **Dictated text vanished into a quiz/ask dialog** — the dialog's option list (not its text field) had focus. Tab into the note/Other field before toggling dictation.
-- **`alt+m` inserts `µ` instead of toggling** (macOS) — your terminal isn't treating Option as Alt. In iTerm2: Profile → Keys → Left/Right Option key → `Esc+`. (Ghostty/Kitty/WezTerm do this by default.)
-- **Shortcuts don't work inside tmux** — if you rebound to `ctrl+shift+m`/`ctrl+shift+n`, those collapse to Enter / `Ctrl+N` unless tmux forwards modified keys; see the tmux section above. The default `alt+m`/`alt+n` bindings do not have this problem.
-- **Need lifecycle logs?** Run pi with `DICTATE_DEBUG=1` — the extension appends timestamped events (key hits, toggles, WebSocket open/error/close with their session generation) to `/tmp/dictate-debug.log`.
-
-## Notes
-
-This is a personal tool I built for my own workflow. I publish it in case it's useful to others. It's MIT-licensed, so fork it freely. Issues and PRs are welcome, but I only maintain what I personally use. So I won't merge anything I don't run myself.
+Install this repository rather than the upstream git package, which uses Deepgram. To uninstall: `pi remove git:github.com/nithilgadde/pi-dictate-local`, then `/reload`. For a local-path installation, pass that path to `pi remove` instead. Homebrew dependencies and the model are not removed.
